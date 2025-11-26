@@ -1,0 +1,9 @@
+flask
+flask-socketio
+eventlet
+requests
+python-pptx
+python-docx
+openpyxl
+duckduckgo-search
+Pillow
