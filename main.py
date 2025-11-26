@@ -34,8 +34,8 @@ from duckduckgo_search import DDGS
 
 # --- CONFIG ---
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret!'
-# cors_allowed_origins="*" is crucial for CodeSandbox's iframe structure
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
+# Allow CORS for Render domains
 socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
 
 # --- GLOBAL STATE ---
@@ -645,8 +645,4 @@ def process_presentation(data, sid):
         if sid in active_generations: del active_generations[sid]
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    print("="*50)
-    print(f" HOSTING ON: http://0.0.0.0:{port}")
-    print("="*50)
-    socketio.run(app, host='0.0.0.0', port=port)
+    socketio.run(app, host='0.0.0.0', port=5000)
