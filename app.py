@@ -3,7 +3,7 @@ eventlet.monkey_patch()
 
 from flask import Flask, render_template, request, send_file, send_from_directory
 from flask_socketio import SocketIO, emit
-# Import tpool to handle blocking libraries like DuckDuckGo
+# Import tpool to handle blocking libraries
 from eventlet import tpool
 import os
 import io
@@ -11,8 +11,6 @@ import time
 import json
 import re
 import requests
-import html
-import urllib.parse
 import base64
 import traceback
 from PIL import Image
@@ -31,7 +29,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
-# Reliable Web Search
+# Reliable Web Search & Chat
 from duckduckgo_search import DDGS
 
 # --- CONFIG ---
@@ -158,7 +156,6 @@ Structure:
 }}
 """
 
-# --- THEMES ---
 THEMES = {
     "Corporate Blue": {"bg": (255,255,255), "title": (0,32,96), "text": (50,50,50), "accent": (0,32,96)},
     "Dark Mode": {"bg": (30,30,30), "title": (255,215,0), "text": (220,220,220), "accent": (70,70,70)},
@@ -178,27 +175,24 @@ def extract_json(raw_text):
     if not match: raise Exception("AI returned invalid JSON")
     return json.loads(match.group(0))
 
+# --- NEW: SAFE AI WRAPPER ---
+def _unsafe_ai_chat(prompt):
+    """Runs inside tpool to avoid blocking Eventlet loop."""
+    with DDGS() as ddgs:
+        # Uses GPT-4o-mini logic provided by DuckDuckGo
+        return ddgs.chat(prompt, model="gpt-4o-mini")
+
 def call_llm(prompt):
-    url = "https://apifreellm.com/api/chat"
-    # Added User-Agent to prevent blocking on Render
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    for attempt in range(1, 4):
-        try:
-            # Increased timeout to 90s for cloud environments
-            res = requests.post(url, headers=headers, json={"message": prompt}, timeout=90)
-            if res.status_code != 200: 
-                time.sleep(2)
-                continue
-            data = res.json()
-            if "response" in data: return data["response"]
-            elif "message" in data: return data["message"]
-        except Exception as e:
-            print(f"LLM Err (Attempt {attempt}): {e}")
-            time.sleep(3)
-    raise Exception("AI API is busy. Try again.")
+    """Thread-safe LLM Caller using DuckDuckGo Chat."""
+    try:
+        # We run this in a separate thread because ddgs uses curl_cffi
+        # which conflicts with Eventlet's monkey patching.
+        response_text = tpool.execute(_unsafe_ai_chat, prompt)
+        return response_text
+    except Exception as e:
+        print(f"LLM Error: {e}")
+        traceback.print_exc()
+        raise Exception("AI API is busy. Try again.")
 
 def check_stop(sid):
     if not active_generations.get(sid, False):
@@ -206,7 +200,7 @@ def check_stop(sid):
         return True
     return False
 
-# --- FIXED SEARCH FUNCTION WITH TPOOL ---
+# --- SAFE SEARCH WRAPPER ---
 def _unsafe_search(query):
     """Raw search function that runs in a native thread."""
     with DDGS() as ddgs:
@@ -215,10 +209,7 @@ def _unsafe_search(query):
 def get_web_context(query):
     print(f"DEBUG: Searching text for: {query}")
     try:
-        # tpool.execute forces this to run in a separate OS thread,
-        # preventing it from crashing the Eventlet worker.
         results = tpool.execute(_unsafe_search, query)
-        
         if not results: return "No specific web data found."
         context_str = ""
         for r in results: context_str += f"[Title: {r['title']}] {r['body']}\n"
