@@ -1,6 +1,7 @@
 flask
 flask-socketio
-eventlet
+gevent
+gevent-websocket
 gunicorn
 requests
 python-pptx
