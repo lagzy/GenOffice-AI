@@ -3,6 +3,8 @@ eventlet.monkey_patch()
 
 from flask import Flask, render_template, request, send_file, send_from_directory
 from flask_socketio import SocketIO, emit
+# Import tpool to handle blocking libraries like DuckDuckGo
+from eventlet import tpool
 import os
 import io
 import time
@@ -35,7 +37,6 @@ from duckduckgo_search import DDGS
 # --- CONFIG ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
-# Allow CORS for Render domains
 socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
 
 # --- GLOBAL STATE ---
@@ -43,7 +44,6 @@ active_generations = {}
 
 # --- PROMPTS ---
 
-# 1. PPT FAST MODE
 PPT_FAST_SYSTEM_PROMPT = """You are a strictly JSON-speaking presentation engine.
 Output valid JSON only. Language: {language}.
 Do not output markdown code blocks. Just raw JSON.
@@ -56,7 +56,6 @@ JSON STRUCTURE:
 }}
 """
 
-# 2. PPT DEEP MODE
 PPT_PLANNER_PROMPT = """You are a Presentation Architect.
 Your goal: Create a detailed To-Do list (Outline) for a presentation about "{topic}".
 Context: {context}.
@@ -104,12 +103,6 @@ Language: {language}.
 STRICT RULES:
 1. "sections" must be a simple list of STRINGS.
 2. DO NOT create objects or subsections inside the list.
-
-CORRECT:
-"sections": ["Introduction", "History", "Features"]
-
-INCORRECT:
-"sections": [{{"title": "Introduction", "subsections": [...]}}]
 
 Output strictly JSON.
 Structure:
@@ -187,17 +180,24 @@ def extract_json(raw_text):
 
 def call_llm(prompt):
     url = "https://apifreellm.com/api/chat"
-    headers = {"Content-Type": "application/json"}
+    # Added User-Agent to prevent blocking on Render
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     for attempt in range(1, 4):
         try:
-            res = requests.post(url, headers=headers, json={"message": prompt}, timeout=60)
-            if res.status_code != 200: continue
+            # Increased timeout to 90s for cloud environments
+            res = requests.post(url, headers=headers, json={"message": prompt}, timeout=90)
+            if res.status_code != 200: 
+                time.sleep(2)
+                continue
             data = res.json()
             if "response" in data: return data["response"]
             elif "message" in data: return data["message"]
         except Exception as e:
-            print(f"LLM Err: {e}")
-            time.sleep(2)
+            print(f"LLM Err (Attempt {attempt}): {e}")
+            time.sleep(3)
     raise Exception("AI API is busy. Try again.")
 
 def check_stop(sid):
@@ -206,11 +206,19 @@ def check_stop(sid):
         return True
     return False
 
+# --- FIXED SEARCH FUNCTION WITH TPOOL ---
+def _unsafe_search(query):
+    """Raw search function that runs in a native thread."""
+    with DDGS() as ddgs:
+        return list(ddgs.text(query, max_results=5))
+
 def get_web_context(query):
     print(f"DEBUG: Searching text for: {query}")
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=5))
+        # tpool.execute forces this to run in a separate OS thread,
+        # preventing it from crashing the Eventlet worker.
+        results = tpool.execute(_unsafe_search, query)
+        
         if not results: return "No specific web data found."
         context_str = ""
         for r in results: context_str += f"[Title: {r['title']}] {r['body']}\n"
