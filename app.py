@@ -1,10 +1,10 @@
-import eventlet
-eventlet.monkey_patch()
+# --- 1. GEVENT MONKEY PATCHING (MUST BE FIRST) ---
+from gevent import monkey
+monkey.patch_all()
 
 from flask import Flask, render_template, request, send_file, send_from_directory
 from flask_socketio import SocketIO, emit
-# Import tpool to handle blocking libraries
-from eventlet import tpool
+from gevent.threadpool import ThreadPool
 import os
 import io
 import time
@@ -35,7 +35,12 @@ from duckduckgo_search import DDGS
 # --- CONFIG ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
-socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
+
+# Switch async_mode to 'gevent'
+socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
+
+# Create a ThreadPool for blocking tasks (Search/AI)
+thread_pool = ThreadPool(20)
 
 # --- GLOBAL STATE ---
 active_generations = {}
@@ -175,23 +180,25 @@ def extract_json(raw_text):
     if not match: raise Exception("AI returned invalid JSON")
     return json.loads(match.group(0))
 
-# --- NEW: SAFE AI WRAPPER ---
+# --- GEVENT SAFE WRAPPERS ---
+
 def _unsafe_ai_chat(prompt):
-    """Runs inside tpool to avoid blocking Eventlet loop."""
-    with DDGS() as ddgs:
-        # Uses GPT-4o-mini logic provided by DuckDuckGo
-        return ddgs.chat(prompt, model="gpt-4o-mini")
+    """Running inside real thread to avoid blocking loop."""
+    try:
+        with DDGS() as ddgs:
+            return ddgs.chat(prompt, model="gpt-4o-mini")
+    except Exception as e:
+        print(f"DDGS Chat Error: {e}")
+        raise e
 
 def call_llm(prompt):
-    """Thread-safe LLM Caller using DuckDuckGo Chat."""
+    """Uses ThreadPool to run blocking IO."""
     try:
-        # We run this in a separate thread because ddgs uses curl_cffi
-        # which conflicts with Eventlet's monkey patching.
-        response_text = tpool.execute(_unsafe_ai_chat, prompt)
-        return response_text
+        # thread_pool.spawn().get() runs the function in a real thread and waits for result
+        return thread_pool.spawn(_unsafe_ai_chat, prompt).get()
     except Exception as e:
         print(f"LLM Error: {e}")
-        traceback.print_exc()
+        # traceback.print_exc()
         raise Exception("AI API is busy. Try again.")
 
 def check_stop(sid):
@@ -200,16 +207,14 @@ def check_stop(sid):
         return True
     return False
 
-# --- SAFE SEARCH WRAPPER ---
 def _unsafe_search(query):
-    """Raw search function that runs in a native thread."""
     with DDGS() as ddgs:
         return list(ddgs.text(query, max_results=5))
 
 def get_web_context(query):
     print(f"DEBUG: Searching text for: {query}")
     try:
-        results = tpool.execute(_unsafe_search, query)
+        results = thread_pool.spawn(_unsafe_search, query).get()
         if not results: return "No specific web data found."
         context_str = ""
         for r in results: context_str += f"[Title: {r['title']}] {r['body']}\n"
